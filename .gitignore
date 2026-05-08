@@ -1,0 +1,37 @@
+# Terraform/OpenTofu state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Backup files
+*.backup
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.zip
+
+# Node
+node_modules/
+
+# Rust
+/target/
+**/target/
+Cargo.lock
+**/.cargo/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit)
+*.pem
+*.key
+credentials.json

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tofu plan *)",
+      "Bash(cargo check *)",
+      "Bash(cargo lambda *)"
+    ]
+  }
+}

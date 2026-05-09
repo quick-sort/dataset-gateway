@@ -1,16 +1,19 @@
-.PHONY: help init init-aws init-tencent deploy-aws deploy-tencent destroy-aws destroy-tencent build-rust
+.PHONY: help init-aws init-tencent deploy-aws deploy-tencent destroy-aws destroy-tencent build-rust build-dataset-gateway run-dataset-gateway
 
 help:
 	@echo "Dataset Gateway - OpenTofu + Rust Deployment"
 	@echo ""
-	@echo "Usage:"
+	@echo "Serverless (AWS/Tencent):"
 	@echo "  make build-rust      Build Rust Lambda function"
-	@echo "  make init-aws        Initialize AWS backend only"
-	@echo "  make init-tencent    Initialize Tencent Cloud backend only"
 	@echo "  make deploy-aws      Deploy AWS infrastructure"
 	@echo "  make deploy-tencent  Deploy Tencent Cloud infrastructure"
 	@echo "  make destroy-aws     Destroy AWS infrastructure"
 	@echo "  make destroy-tencent Destroy Tencent Cloud infrastructure"
+	@echo ""
+	@echo "Local dataset-gateway:"
+	@echo "  make build-dataset-gateway  Build local gateway binary"
+	@echo "  make run-dataset-gateway    Run local gateway (requires Redis)"
+	@echo "  make docker-dataset-gateway  Build Docker image"
 	@echo ""
 	@echo "Prerequisites:"
 	@echo "  - OpenTofu installed"
@@ -48,3 +51,15 @@ destroy-aws:
 destroy-tencent:
 	@echo "Destroying Tencent Cloud infrastructure..."
 	@cd tencent && tofu destroy -var="tencent_region=$${TENCENT_REGION:-ap-beijing}" -var="project_name=$${PROJECT_NAME:-dataset-gateway}"
+
+build-dataset-gateway:
+	@echo "Building dataset-gateway..."
+	@cd dataset-gateway && cargo build --release
+
+run-dataset-gateway:
+	@echo "Running dataset-gateway..."
+	@cd dataset-gateway && cargo run
+
+docker-dataset-gateway:
+	@echo "Building dataset-gateway Docker image..."
+	@cd dataset-gateway && docker build -t dataset-gateway .

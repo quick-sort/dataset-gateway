@@ -46,14 +46,22 @@ async fn lambda_handler(event: LambdaEvent<ApiGatewayEvent>) -> Result<ApiGatewa
             m
         });
 
-    let api_key = event.headers.get("x-api-key").cloned().unwrap_or_default();
+    let api_key = event.headers.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.as_str())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
-    if !api_key_permissions.contains_key(&api_key) {
+    if api_key.is_empty() || !api_key_permissions.contains_key(&api_key) {
         return Ok(ApiGatewayResponse {
-            status_code: 403,
-            body: Some("Invalid API Key".to_string()),
+            status_code: 401,
+            body: Some("Invalid or missing Bearer token".to_string()),
             is_base64_encoded: false,
-            headers: None,
+            headers: Some(HashMap::from([(
+                "WWW-Authenticate".to_string(),
+                "Bearer".to_string(),
+            )])),
         });
     }
 

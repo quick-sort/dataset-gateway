@@ -2,7 +2,7 @@
 
 # 一、方案核心目标
 
-- 客户端通过 **API Key** 鉴权，仅能访问指定前缀路径的文件（如 S3://bucket/prefix/path/\*、COS://bucket/prefix/path/\*）
+- 客户端通过 **Authorization: Bearer \<token\>** 鉴权，仅能访问指定前缀路径的文件（如 S3://bucket/prefix/path/\*、COS://bucket/prefix/path/\*）
 
 - 纯 Serverless 架构，0 服务器维护、自动扩缩容，双云（AWS\+腾讯云）1:1 对齐
 
@@ -14,11 +14,11 @@
 
 ## 2\.1 核心架构流程
 
-1. 客户端发送请求（带 API Key 头部），访问 API 网关的指定路径（如 /get/\{path\}）
+1. 客户端发送请求（带 `Authorization: Bearer \<token\>` 头部），访问 API 网关的指定路径（如 /get/\{path\}）
 
-2. API 网关校验 API Key 有效性，触发后端无服务器函数（Lambda/SCF）
+2. API 网关将请求转发至后端无服务器函数（Lambda/SCF）
 
-3. 函数校验 API Key 绑定的权限：判断请求路径是否在允许的前缀范围内
+3. 函数解析 Bearer Token 并校验其绑定的权限：判断请求路径是否在允许的前缀范围内
 
 4. 鉴权通过后，函数生成 S3/COS 临时签名 URL（15分钟有效）
 
@@ -32,8 +32,8 @@
 |---|---|---|
 |对象存储（存储 Gzip 压缩文件）|S3|对象存储（COS）|
 |无服务器函数（鉴权\+生成临时URL）|Lambda|云函数（SCF）|
-|API 入口 \+ API Key 管理|API Gateway|API 网关|
-|权限存储（API Key\-前缀映射）|DynamoDB（生产）/ 函数内配置（测试）|CDB/Redis（生产）/ 函数内配置（测试）|
+|API 入口（Bearer Token 在函数内校验）|API Gateway|API 网关|
+|权限存储（Token\-前缀映射）|DynamoDB（生产）/ 函数内配置（测试）|CDB/Redis（生产）/ 函数内配置（测试）|
 
 # 三、核心实现代码（双云可直接复制上线）
 
@@ -59,14 +59,20 @@ API_KEY_PERMISSIONS = {
 # 初始化 S3 客户端
 s3 = boto3.client('s3')
 
+def _extract_bearer(headers):
+    for k, v in headers.items():
+        if k.lower() == 'authorization' and isinstance(v, str) and v[:7].lower() == 'bearer ':
+            return v[7:].strip()
+    return ''
+
 def lambda_handler(event, context):
-    # 1. 获取客户端传入的 API Key 和请求路径
-    api_key = event['headers'].get('x-api-key', '')
+    # 1. 解析 Authorization: Bearer <token> 头部和请求路径
+    api_key = _extract_bearer(event.get('headers', {}))
     path = event['pathParameters']['path']  # 路径参数，如 userA/photo.jpg
 
-    # 2. API Key 有效性校验
-    if api_key not in API_KEY_PERMISSIONS:
-        return {"statusCode": 403, "body": "Invalid API Key"}
+    # 2. Token 有效性校验
+    if not api_key or api_key not in API_KEY_PERMISSIONS:
+        return {"statusCode": 401, "headers": {"WWW-Authenticate": "Bearer"}, "body": "Invalid or missing Bearer token"}
     
     # 3. 路径前缀权限校验
     config = API_KEY_PERMISSIONS[api_key]
@@ -93,13 +99,13 @@ def lambda_handler(event, context):
 
 ### 3\.1\.2 API Gateway 配置
 
-1. 创建 API，开启 **API Key 认证**，绑定 Lambda 函数
+1. 创建 API，授权方式设置为 **NONE**（鉴权由 Lambda 解析 Bearer Token 完成），绑定 Lambda 函数
 
 2. 设置路径：`/get/\{path\}`（\{path\} 为路径参数，对应文件路径，如 userA/photo\.jpg）
 
 3. 部署 API，客户端请求示例：
         `GET https://你的API网关域名/get/userA/photo\.jpg
-Header: x\-api\-key: api\_key\_abc123`
+Header: Authorization: Bearer api\_key\_abc123`
 
 ## 3\.2 腾讯云实现（COS \+ SCF \+ API 网关）
 
@@ -122,14 +128,20 @@ def get_cos_client(region):
     config = CosConfig(Region=region)
     return CosS3Client(config)
 
+def _extract_bearer(headers):
+    for k, v in headers.items():
+        if k.lower() == 'authorization' and isinstance(v, str) and v[:7].lower() == 'bearer ':
+            return v[7:].strip()
+    return ''
+
 def main_handler(event, context):
-    # 1. 获取 API Key 和请求路径
-    api_key = event['headers'].get('x-api-key', '')
+    # 1. 解析 Authorization: Bearer <token> 头部和请求路径
+    api_key = _extract_bearer(event.get('headers', {}))
     path = event['pathParameters']['path']  # 如 userA/photo.jpg
 
-    # 2. API Key 校验
-    if api_key not in API_KEY_PERMISSIONS:
-        return {"statusCode": 403, "body": "Invalid API Key"}
+    # 2. Token 校验
+    if not api_key or api_key not in API_KEY_PERMISSIONS:
+        return {"statusCode": 401, "headers": {"WWW-Authenticate": "Bearer"}, "body": "Invalid or missing Bearer token"}
     
     # 3. 路径前缀校验
     config = API_KEY_PERMISSIONS[api_key]
@@ -158,11 +170,11 @@ def main_handler(event, context):
 
 ### 3\.2\.2 API 网关配置
 
-1. 创建 API，开启 **API Key 认证**，触发 SCF 函数
+1. 创建 API，授权方式为 **NONE**（Bearer Token 由 SCF 函数解析），触发 SCF 函数
 
 2. 设置路径：`/get/\{path\}`，与 AWS 保持一致
 
-3. 客户端请求方式与 AWS 完全相同，无需修改代码
+3. 客户端请求方式与 AWS 完全相同（`Authorization: Bearer \<token\>`），无需修改代码
 
 # 四、Gzip 压缩存储 \+ 自动解压配置（核心）
 
@@ -247,7 +259,7 @@ coscmd put file.jpg.gz userA/file.jpg.gz \
 
 # 六、生产级增强建议（可选）
 
-1. 权限存储：将函数内的 API Key 配置，迁移到 DynamoDB（AWS）/ CDB/Redis（腾讯云），支持动态更新、密钥轮换
+1. 权限存储：将函数内的 Bearer Token 配置，迁移到 DynamoDB（AWS）/ CDB/Redis（腾讯云），支持动态更新、密钥轮换
 
 2. 限流防护：在 API 网关开启限流，防止恶意请求攻击
 
@@ -267,6 +279,6 @@ coscmd put file.jpg.gz userA/file.jpg.gz \
 
 4. 配置 API 网关，开启 API Key 认证，绑定函数并部署
 
-5. 客户端发送请求（带 API Key），测试自动重定向、自动解压功能
+5. 客户端发送请求（带 `Authorization: Bearer \<token\>` 头部），测试自动重定向、自动解压功能
 
 > （注：文档部分内容可能由 AI 生成）

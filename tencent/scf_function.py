@@ -12,12 +12,25 @@ def get_cos_client(region):
     config = CosConfig(Region=region)
     return CosS3Client(config)
 
+def _extract_bearer_token(headers):
+    for key, value in headers.items():
+        if key.lower() == 'authorization' and isinstance(value, str):
+            stripped = value.strip()
+            if stripped[:7].lower() == 'bearer ':
+                return stripped[7:].strip()
+    return ''
+
+
 def main_handler(event, _context):
-    api_key = event['headers'].get('x-api-key', '')
+    api_key = _extract_bearer_token(event.get('headers', {}))
     path = event['pathParameters']['path']
 
-    if api_key not in API_KEY_PERMISSIONS:
-        return {"statusCode": 403, "body": "Invalid API Key"}
+    if not api_key or api_key not in API_KEY_PERMISSIONS:
+        return {
+            "statusCode": 401,
+            "headers": {"WWW-Authenticate": "Bearer"},
+            "body": "Invalid or missing Bearer token",
+        }
 
     config = API_KEY_PERMISSIONS[api_key]
     bucket = config['bucket']

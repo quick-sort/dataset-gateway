@@ -13,7 +13,6 @@ services:
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN:?set ADMIN_TOKEN}
       - REDIS_URL=redis://redis:6379
-      - AWS_REGION=${AWS_REGION:-us-east-1}
       - RATE_LIMIT_WINDOW_SECS=${RATE_LIMIT_WINDOW_SECS:-60}
       - PRESIGN_EXPIRY_SECS=${PRESIGN_EXPIRY_SECS:-900}
     depends_on:

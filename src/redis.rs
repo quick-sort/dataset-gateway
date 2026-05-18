@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyConfig {
-    pub bucket: String,
     pub prefixes: Vec<String>,
     pub rate_limit: u64,
 }
@@ -68,6 +67,19 @@ impl RedisStore {
         Ok(count)
     }
 
+    pub async fn get_all_usage(&self, key: &str) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+        let mut usage = std::collections::HashMap::new();
+        let today = chrono::Local::now().date_naive();
+        for i in 0..7 {
+            let date = (today - chrono::Duration::days(i)).format("%Y-%m-%d").to_string();
+            let count = self.get_usage(key, &date).await.unwrap_or(0);
+            if count > 0 {
+                usage.insert(date, count);
+            }
+        }
+        Ok(usage)
+    }
+
     pub async fn check_rate_limit(&self, key: &str, max_requests: u64) -> anyhow::Result<bool> {
         let mut conn = self.conn.clone();
         let rl_key = format!("ratelimit:{}", key);
@@ -120,8 +132,7 @@ mod tests {
 
         let key = format!("test-key-{}", uuid::Uuid::new_v4());
         let config = ApiKeyConfig {
-            bucket: "test-bucket".into(),
-            prefixes: vec!["data/".into(), "public/".into()],
+            prefixes: vec!["data/".into(), "local/".into()],
             rate_limit: 50,
         };
 
@@ -130,8 +141,7 @@ mod tests {
 
         // Read
         let loaded = store.get_api_key(&key).await.unwrap().unwrap();
-        assert_eq!(loaded.bucket, "test-bucket");
-        assert_eq!(loaded.prefixes, vec!["data/", "public/"]);
+        assert_eq!(loaded.prefixes, vec!["data/", "local/"]);
         assert_eq!(loaded.rate_limit, 50);
 
         // List
@@ -205,14 +215,22 @@ mod tests {
     #[test]
     fn api_key_config_serialization() {
         let config = ApiKeyConfig {
-            bucket: "my-bucket".into(),
-            prefixes: vec!["a/".into(), "b/".into()],
+            prefixes: vec!["data/".into(), "local/".into()],
             rate_limit: 100,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ApiKeyConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.bucket, "my-bucket");
-        assert_eq!(parsed.prefixes, vec!["a/", "b/"]);
+        assert_eq!(parsed.prefixes, vec!["data/", "local/"]);
         assert_eq!(parsed.rate_limit, 100);
+    }
+
+    #[test]
+    fn api_key_config_deserialization() {
+        let json = r#"{"prefixes":["s3data/","localdata/"],"rate_limit":200}"#;
+        let parsed: ApiKeyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.prefixes.len(), 2);
+        assert_eq!(parsed.prefixes[0], "s3data/");
+        assert_eq!(parsed.prefixes[1], "localdata/");
+        assert_eq!(parsed.rate_limit, 200);
     }
 }

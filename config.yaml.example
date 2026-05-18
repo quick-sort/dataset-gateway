@@ -2,6 +2,23 @@ admin_token: "your-admin-token-here"
 redis_url: "redis://localhost:6379"
 redis_password: "your-redis-password"
 listen_addr: "0.0.0.0:8080"
-aws_region: "us-east-1"
 rate_limit_window_secs: 60
 presign_expiry_secs: 900
+
+# Gateway-level path prefix to storage backend routing.
+# Each route maps a request path prefix to a storage backend.
+# Longest prefix match wins. S3 routes can specify a region.
+storage_routes:
+  datasets/:
+    storage_type: s3
+    target: my-data-bucket
+    region: us-east-1
+    key_prefix: ""
+  images/:
+    storage_type: s3
+    target: my-image-bucket
+    region: ap-southeast-1
+    key_prefix: "processed/"
+  local/:
+    storage_type: local
+    target: /data/files

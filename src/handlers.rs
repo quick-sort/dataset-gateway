@@ -1,13 +1,17 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
+use std::collections::HashMap;
 
-use crate::presign::Presigner;
+use crate::config::StorageRoute;
 use crate::redis::{ApiKeyConfig, RedisStore};
+use crate::storage;
 
 pub struct AppState {
     pub admin_token: String,
     pub redis: RedisStore,
-    pub presigner: Presigner,
+    pub s3_clients: HashMap<String, storage::S3Storage>,
+    pub local: storage::LocalStorage,
+    pub storage_routes: HashMap<String, StorageRoute>,
 }
 
 fn extract_bearer_token(req: &HttpRequest) -> Option<String> {
@@ -50,13 +54,20 @@ pub async fn get_file(
 
     let path_str = path.into_inner();
 
-    if !key_config
+    // Check access: find the longest prefix the key is allowed to access
+    let matched_prefix = key_config
         .prefixes
         .iter()
-        .any(|prefix| path_str.starts_with(prefix))
-    {
-        return HttpResponse::Forbidden().json("Access denied: path not allowed");
-    }
+        .filter(|p| path_str.starts_with(p.as_str()))
+        .max_by_key(|p| p.len())
+        .cloned();
+
+    let match_prefix = match matched_prefix {
+        Some(p) => p,
+        None => {
+            return HttpResponse::Forbidden().json("Access denied: path not allowed");
+        }
+    };
 
     if let Err(e) = state.redis.increment_usage(&token).await {
         log::error!("Usage increment error: {}", e);
@@ -72,16 +83,91 @@ pub async fn get_file(
         }
     }
 
-    let s3_key = format!("{}.gz", path_str);
-    match state.presigner.presign(&key_config.bucket, &s3_key).await {
-        Ok(url) => HttpResponse::Found()
-            .insert_header(("Location", url))
-            .finish(),
-        Err(e) => {
-            log::error!("Presign error: {}", e);
-            HttpResponse::InternalServerError().json("Failed to generate presigned URL")
+    // Resolve storage backend from gateway-level routes
+    let route = match state
+        .storage_routes
+        .iter()
+        .filter(|(prefix, _)| path_str.starts_with(prefix.as_str()))
+        .max_by_key(|(prefix, _)| prefix.len())
+    {
+        Some((_, r)) => r,
+        None => {
+            return HttpResponse::InternalServerError()
+                .json("No storage route configured for this path");
+        }
+    };
+
+    let remaining = &path_str[match_prefix.len()..];
+    let storage_key = format!("{}{}.gz", route.key_prefix, remaining);
+
+    match route.storage_type.as_str() {
+        "local" => match state.local.read(&route.target, &storage_key).await {
+            Ok(data) => {
+                let content_type = storage::guess_content_type(&path_str);
+                HttpResponse::Ok()
+                    .insert_header(("Content-Encoding", "gzip"))
+                    .insert_header(("Content-Type", content_type))
+                    .body(data)
+            }
+            Err(e) => {
+                log::error!("Local read error: {}", e);
+                if e.contains("not found") || e.contains("No such file") {
+                    HttpResponse::NotFound().json("File not found")
+                } else {
+                    HttpResponse::InternalServerError().json("Failed to read file")
+                }
+            }
+        },
+        _ => {
+            let region = route.region.as_deref().unwrap_or("us-east-1");
+            let s3 = match state.s3_clients.get(region) {
+                Some(c) => c,
+                None => {
+                    log::error!("No S3 client for region: {}", region);
+                    return HttpResponse::InternalServerError()
+                        .json("Storage backend not configured");
+                }
+            };
+            match s3.presign(&route.target, &storage_key).await {
+                Ok(url) => HttpResponse::Found()
+                    .insert_header(("Location", url))
+                    .finish(),
+                Err(e) => {
+                    log::error!("Presign error: {}", e);
+                    HttpResponse::InternalServerError().json("Failed to generate presigned URL")
+                }
+            }
         }
     }
+}
+
+// GET /usage
+pub async fn get_usage(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let token = match extract_bearer_token(&req) {
+        Some(t) => t,
+        None => return unauthorized(),
+    };
+
+    let key_config = match state.redis.get_api_key(&token).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return unauthorized(),
+        Err(e) => {
+            log::error!("Redis error: {}", e);
+            return HttpResponse::InternalServerError().json("Internal error");
+        }
+    };
+
+    let usage = state.redis.get_all_usage(&token).await.unwrap_or_default();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "key": token,
+        "prefixes": key_config.prefixes,
+        "rate_limit": key_config.rate_limit,
+        "usage": usage,
+    }))
 }
 
 // GET /admin/keys
@@ -105,7 +191,6 @@ pub async fn list_keys(
 #[derive(Deserialize)]
 pub struct CreateKeyRequest {
     pub key: String,
-    pub bucket: String,
     pub prefixes: Vec<String>,
     #[serde(default = "default_rate_limit")]
     pub rate_limit: u64,
@@ -126,7 +211,6 @@ pub async fn create_key(
     }
 
     let config = ApiKeyConfig {
-        bucket: body.bucket.clone(),
         prefixes: body.prefixes.clone(),
         rate_limit: body.rate_limit,
     };
@@ -134,7 +218,6 @@ pub async fn create_key(
     match state.redis.create_api_key(&body.key, &config).await {
         Ok(()) => HttpResponse::Created().json(serde_json::json!({
             "key": body.key,
-            "bucket": body.bucket,
             "prefixes": body.prefixes,
             "rate_limit": body.rate_limit,
         })),
@@ -162,7 +245,6 @@ pub async fn get_key(
             let usage = state.redis.get_usage(&key_str, &today).await.unwrap_or(0);
             HttpResponse::Ok().json(serde_json::json!({
                 "key": key_str,
-                "bucket": config.bucket,
                 "prefixes": config.prefixes,
                 "rate_limit": config.rate_limit,
                 "usage_today": usage,
@@ -178,7 +260,6 @@ pub async fn get_key(
 
 #[derive(Deserialize)]
 pub struct UpdateKeyRequest {
-    pub bucket: Option<String>,
     pub prefixes: Option<Vec<String>>,
     pub rate_limit: Option<u64>,
 }
@@ -206,15 +287,13 @@ pub async fn update_key(
 
     let body = body.into_inner();
     let updated = ApiKeyConfig {
-        bucket: body.bucket.unwrap_or_else(|| existing.bucket),
-        prefixes: body.prefixes.unwrap_or_else(|| existing.prefixes),
+        prefixes: body.prefixes.unwrap_or(existing.prefixes),
         rate_limit: body.rate_limit.unwrap_or(existing.rate_limit),
     };
 
     match state.redis.create_api_key(&key_str, &updated).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "key": key_str,
-            "bucket": updated.bucket,
             "prefixes": updated.prefixes,
             "rate_limit": updated.rate_limit,
         })),
@@ -324,17 +403,27 @@ mod tests {
     }
 
     #[test]
-    fn create_key_request_defaults() {
-        let json = r#"{"key":"k","bucket":"b","prefixes":["p/"]}"#;
+    fn create_key_request_with_prefixes() {
+        let json = r#"{
+            "key": "k",
+            "prefixes": ["data/", "local/"],
+            "rate_limit": 50
+        }"#;
         let req: CreateKeyRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.rate_limit, 100); // default
+        assert_eq!(req.prefixes.len(), 2);
+        assert_eq!(req.prefixes[0], "data/");
+        assert_eq!(req.prefixes[1], "local/");
+        assert_eq!(req.rate_limit, 50);
     }
 
     #[test]
-    fn create_key_request_custom_rate_limit() {
-        let json = r#"{"key":"k","bucket":"b","prefixes":["p/"],"rate_limit":50}"#;
+    fn create_key_request_defaults() {
+        let json = r#"{
+            "key": "k",
+            "prefixes": ["data/"]
+        }"#;
         let req: CreateKeyRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.rate_limit, 50);
+        assert_eq!(req.rate_limit, 100);
     }
 
     #[test]

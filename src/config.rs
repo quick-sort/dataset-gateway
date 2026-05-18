@@ -2,14 +2,25 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StorageRoute {
+    pub storage_type: String,
+    pub target: String,
+    #[serde(default)]
+    pub key_prefix: String,
+    pub region: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppConfig {
     pub admin_token: String,
     pub redis_url: String,
     pub listen_addr: String,
-    pub aws_region: String,
     pub rate_limit_window_secs: u64,
     pub presign_expiry_secs: u64,
+    pub storage_routes: HashMap<String, StorageRoute>,
 }
 
 #[derive(serde::Deserialize)]
@@ -18,9 +29,9 @@ struct YamlConfig {
     redis_url: Option<String>,
     redis_password: Option<String>,
     listen_addr: Option<String>,
-    aws_region: Option<String>,
     rate_limit_window_secs: Option<u64>,
     presign_expiry_secs: Option<u64>,
+    storage_routes: Option<HashMap<String, StorageRoute>>,
 }
 
 impl AppConfig {
@@ -55,11 +66,6 @@ impl AppConfig {
             .or_else(|| yaml.as_ref().and_then(|y| y.listen_addr.clone()))
             .unwrap_or_else(|| "0.0.0.0:8080".into());
 
-        let aws_region = env::var("AWS_REGION")
-            .ok()
-            .or_else(|| yaml.as_ref().and_then(|y| y.aws_region.clone()))
-            .unwrap_or_else(|| "us-east-1".into());
-
         let rate_limit_window_secs = env::var("RATE_LIMIT_WINDOW_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -72,13 +78,18 @@ impl AppConfig {
             .or_else(|| yaml.as_ref().and_then(|y| y.presign_expiry_secs))
             .unwrap_or(900);
 
+        let storage_routes = yaml
+            .as_ref()
+            .and_then(|y| y.storage_routes.clone())
+            .unwrap_or_default();
+
         Ok(Self {
             admin_token,
             redis_url,
             listen_addr,
-            aws_region,
             rate_limit_window_secs,
             presign_expiry_secs,
+            storage_routes,
         })
     }
 
@@ -118,7 +129,6 @@ mod tests {
         std::env::set_var("REDIS_URL", "redis://localhost:6379");
         std::env::remove_var("REDIS_PASSWORD");
         std::env::remove_var("LISTEN_ADDR");
-        std::env::remove_var("AWS_REGION");
         std::env::remove_var("RATE_LIMIT_WINDOW_SECS");
         std::env::remove_var("PRESIGN_EXPIRY_SECS");
 
@@ -126,7 +136,6 @@ mod tests {
         assert_eq!(config.admin_token, "test-token");
         assert_eq!(config.redis_url, "redis://localhost:6379");
         assert_eq!(config.listen_addr, "0.0.0.0:8080");
-        assert_eq!(config.aws_region, "us-east-1");
         assert_eq!(config.rate_limit_window_secs, 60);
         assert_eq!(config.presign_expiry_secs, 900);
 
@@ -155,19 +164,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dg-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let yaml_path = dir.join("config.yaml");
-        std::fs::write(&yaml_path, "admin_token: yaml-token\nlisten_addr: 127.0.0.1:9000\naws_region: ap-southeast-1\n").unwrap();
+        std::fs::write(&yaml_path, "admin_token: yaml-token\nlisten_addr: 127.0.0.1:9000\n").unwrap();
 
         std::env::set_var("CONFIG_FILE", yaml_path.to_str().unwrap());
         std::env::set_var("ADMIN_TOKEN", "yaml-token");
         std::env::remove_var("REDIS_URL");
         std::env::remove_var("REDIS_PASSWORD");
         std::env::remove_var("LISTEN_ADDR");
-        std::env::remove_var("AWS_REGION");
 
         let config = AppConfig::load().unwrap();
         assert_eq!(config.admin_token, "yaml-token");
         assert_eq!(config.listen_addr, "127.0.0.1:9000"); // yaml value
-        assert_eq!(config.aws_region, "ap-southeast-1"); // yaml value
 
         std::fs::remove_dir_all(&dir).unwrap();
         std::env::remove_var("CONFIG_FILE");
@@ -180,19 +187,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dg-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let yaml_path = dir.join("config.yaml");
-        std::fs::write(&yaml_path, "admin_token: yaml-token\nlisten_addr: 127.0.0.1:9000\naws_region: ap-southeast-1\n").unwrap();
+        std::fs::write(&yaml_path, "admin_token: yaml-token\nlisten_addr: 127.0.0.1:9000\n").unwrap();
 
         std::env::set_var("CONFIG_FILE", yaml_path.to_str().unwrap());
         std::env::set_var("ADMIN_TOKEN", "env-token");
         std::env::set_var("LISTEN_ADDR", "0.0.0.0:3000");
         std::env::remove_var("REDIS_URL");
         std::env::remove_var("REDIS_PASSWORD");
-        std::env::remove_var("AWS_REGION");
 
         let config = AppConfig::load().unwrap();
         assert_eq!(config.admin_token, "env-token"); // env wins over yaml
         assert_eq!(config.listen_addr, "0.0.0.0:3000"); // env wins over yaml
-        assert_eq!(config.aws_region, "ap-southeast-1"); // yaml fallback (env removed)
 
         std::fs::remove_dir_all(&dir).unwrap();
         std::env::remove_var("CONFIG_FILE");

@@ -1,6 +1,6 @@
 # dataset-gateway
 
-A lightweight dataset access gateway built with Rust (actix-web + Redis). Clients authenticate with a Bearer token, the gateway checks access scope and rate limits, then serves files from S3 (302 redirect to presigned URL) or local filesystem (gzip body).
+A lightweight dataset access gateway built with Rust (actix-web + Redis). Clients authenticate with a Bearer token, the gateway checks access scope and rate limits, then serves files from S3 (302 redirect to presigned URL) or local filesystem (200 body). Storage backend is transparent to the client.
 
 ## Architecture
 
@@ -19,13 +19,13 @@ Client                  Gateway                    Storage
   |<-- 302 Location ------|                          |
   |                       |                          |
   |                       |------ local: read file --|
-  |<-- 200 gzip body -----|                          |
+  |<-- 200 body ----------|                          |
 ```
 
 **Two-tier auth:**
 
 - **Admin token** — loaded at startup from env or `config.yaml`. Grants access to `/admin/keys` CRUD endpoints only.
-- **API keys** — stored in Redis as `apikey:{key}` → JSON with access scope and rate limit. Validated per request.
+- **API keys** — stored in Redis with access scope and per-key rate limit. Validated per request.
 
 **Storage is transparent to the client.** The gateway config defines path prefix → storage backend mappings. API keys only specify which prefixes they're allowed to access.
 
@@ -43,12 +43,14 @@ presign_expiry_secs: 900
 
 # Path prefix → storage backend routing (longest match wins)
 # Each S3 route specifies its own region.
+# Set default_gzip: true to try {path}.gz first, then {path}.
 storage_routes:
   datasets/:
     storage_type: s3
     target: my-data-bucket
     region: us-east-1
     key_prefix: ""
+    default_gzip: true
   images/:
     storage_type: s3
     target: my-image-bucket
@@ -57,12 +59,24 @@ storage_routes:
   local/:
     storage_type: local
     target: /data/files
+    default_gzip: true
   datasets/premium/:
     storage_type: s3
     target: premium-bucket
     region: eu-west-1
     key_prefix: ""
+    default_gzip: true
 ```
+
+### Storage route fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `storage_type` | yes | | `"s3"` or `"local"` |
+| `target` | yes | | S3 bucket name or local directory path |
+| `region` | S3 only | `"us-east-1"` | AWS region for the S3 bucket |
+| `key_prefix` | no | `""` | Prepended to the storage key after stripping the matched prefix |
+| `default_gzip` | no | `false` | Try `{path}.gz` first, fall back to `{path}` |
 
 ### Environment variables
 
@@ -80,9 +94,18 @@ All config values can be set via env vars (override `config.yaml`):
 
 S3 region is set per storage route in `config.yaml`, not globally.
 
+### default_gzip behavior
+
+When `default_gzip: true`, the client requests `GET /get/datasets/train.csv` and the gateway:
+
+1. Tries `datasets/train.csv.gz` first
+2. Falls back to `datasets/train.csv` if `.gz` not found
+3. For local storage: sets `Content-Encoding: gzip` when serving `.gz` files so clients decompress transparently
+4. For S3: presigns the `.gz` key; the bucket should have `Content-Encoding: gzip` set on objects
+
 ## API Keys (stored in Redis)
 
-Each API key has an access scope (list of allowed path prefixes) and a rate limit:
+Each API key has an access scope (list of allowed path prefixes) and a per-key rate limit:
 
 ```json
 {
@@ -96,7 +119,7 @@ Each API key has an access scope (list of allowed path prefixes) and a rate limi
 | Gateway config | API key scope | Client request | Result |
 |---|---|---|---|
 | `datasets/` → S3 `my-bucket` (us-east-1) | `["datasets/"]` | `GET /get/datasets/train.csv` | 302 → S3 presigned URL |
-| `local/` → local `/data/files` | `["local/"]` | `GET /get/local/readme.txt` | 200 gzip body |
+| `local/` → local `/data/files` | `["local/"]` | `GET /get/local/readme.txt` | 200 body |
 | `datasets/` → S3, `local/` → local | `["datasets/"]` | `GET /get/local/readme.txt` | 403 (not in scope) |
 | `datasets/` → S3, `datasets/premium/` → S3 | `["datasets/"]` | `GET /get/datasets/premium/gold.csv` | 302 → premium bucket (longest prefix match) |
 
@@ -109,7 +132,7 @@ GET /get/{path}
 Authorization: Bearer <api-key>
 ```
 
-- `200` — file body (local storage, gzip-encoded)
+- `200` — file body (local storage)
 - `302` — redirect to presigned S3 URL
 - `401` — missing or invalid token
 - `403` — path not in key's access scope
@@ -123,14 +146,18 @@ GET /usage
 Authorization: Bearer <api-key>
 ```
 
-Returns usage info for the caller's API key:
+Returns usage info for the caller's API key (last 7 days):
 
 ```json
 {
   "key": "client-alpha-2024",
   "prefixes": ["datasets/", "local/"],
   "rate_limit": 100,
-  "usage_today": 42
+  "usage": {
+    "2026-05-12": 15,
+    "2026-05-14": 23,
+    "2026-05-18": 42
+  }
 }
 ```
 
@@ -157,7 +184,7 @@ POST /admin/keys
 }
 ```
 
-#### Get key
+#### Get key (admin)
 
 ```json
 GET /admin/keys/client-alpha-2024
@@ -188,17 +215,6 @@ PUT /admin/keys/client-alpha-2024
 | `usage:{key}:{date}` | integer | Daily request counter, auto-expires after 7 days |
 | `ratelimit:{key}` | sorted set | Sliding-window rate limit timestamps |
 
-## File Convention
-
-Files are stored gzip-compressed with a `.gz` suffix:
-
-```
-datasets/train.csv     → datasets/train.csv.gz     (on S3 or local disk)
-images/photo.png       → images/photo.png.gz
-```
-
-The gateway appends `.gz` automatically. For local storage, responses include `Content-Encoding: gzip` so clients decompress transparently. For S3, the bucket should have `Content-Encoding: gzip` set on objects.
-
 ## Quick Start
 
 ### Docker Compose
@@ -228,6 +244,10 @@ curl -X POST http://localhost:8080/admin/keys \
 
 # Request a file
 curl -v http://localhost:8080/get/datasets/train.csv \
+  -H "Authorization: Bearer test-key"
+
+# Check usage
+curl http://localhost:8080/usage \
   -H "Authorization: Bearer test-key"
 ```
 

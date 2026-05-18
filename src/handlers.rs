@@ -98,26 +98,43 @@ pub async fn get_file(
     };
 
     let remaining = &path_str[match_prefix.len()..];
-    let storage_key = format!("{}{}.gz", route.key_prefix, remaining);
+    let gz_key = format!("{}{}.gz", route.key_prefix, remaining);
+    let plain_key = format!("{}{}", route.key_prefix, remaining);
 
     match route.storage_type.as_str() {
-        "local" => match state.local.read(&route.target, &storage_key).await {
-            Ok(data) => {
-                let content_type = storage::guess_content_type(&path_str);
-                HttpResponse::Ok()
-                    .insert_header(("Content-Encoding", "gzip"))
-                    .insert_header(("Content-Type", content_type))
-                    .body(data)
-            }
-            Err(e) => {
-                log::error!("Local read error: {}", e);
-                if e.contains("not found") || e.contains("No such file") {
-                    HttpResponse::NotFound().json("File not found")
-                } else {
-                    HttpResponse::InternalServerError().json("Failed to read file")
+        "local" => {
+            let result = if route.default_gzip {
+                match state.local.read(&route.target, &gz_key).await {
+                    Ok(data) => Ok(data),
+                    Err(_) => state.local.read(&route.target, &plain_key).await,
+                }
+            } else {
+                state.local.read(&route.target, &plain_key).await
+            };
+            match result {
+                Ok(data) => {
+                    let ct = storage::guess_content_type(&path_str);
+                    if gz_key.ends_with(".gz") || plain_key.ends_with(".gz") {
+                        HttpResponse::Ok()
+                            .insert_header(("Content-Type", ct))
+                            .insert_header(("Content-Encoding", "gzip"))
+                            .body(data)
+                    } else {
+                        HttpResponse::Ok()
+                            .insert_header(("Content-Type", ct))
+                            .body(data)
+                    }
+                }
+                Err(e) => {
+                    log::error!("Local read error: {}", e);
+                    if e.contains("not found") || e.contains("No such file") {
+                        HttpResponse::NotFound().json("File not found")
+                    } else {
+                        HttpResponse::InternalServerError().json("Failed to read file")
+                    }
                 }
             }
-        },
+        }
         _ => {
             let region = route.region.as_deref().unwrap_or("us-east-1");
             let s3 = match state.s3_clients.get(region) {
@@ -128,7 +145,8 @@ pub async fn get_file(
                         .json("Storage backend not configured");
                 }
             };
-            match s3.presign(&route.target, &storage_key).await {
+            let key = if route.default_gzip { &gz_key } else { &plain_key };
+            match s3.presign(&route.target, key).await {
                 Ok(url) => HttpResponse::Found()
                     .insert_header(("Location", url))
                     .finish(),

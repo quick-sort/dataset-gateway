@@ -11,6 +11,8 @@ pub struct StorageRoute {
     #[serde(default)]
     pub key_prefix: String,
     pub region: Option<String>,
+    #[serde(default)]
+    pub default_gzip: bool,
 }
 
 #[derive(Clone)]

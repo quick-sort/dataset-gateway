@@ -8,12 +8,14 @@ presign_expiry_secs: 900
 # Gateway-level path prefix to storage backend routing.
 # Each route maps a request path prefix to a storage backend.
 # Longest prefix match wins. S3 routes can specify a region.
+# Set default_gzip: true to try {path}.gz first, then {path}.
 storage_routes:
   datasets/:
     storage_type: s3
     target: my-data-bucket
     region: us-east-1
     key_prefix: ""
+    default_gzip: true
   images/:
     storage_type: s3
     target: my-image-bucket
@@ -22,3 +24,4 @@ storage_routes:
   local/:
     storage_type: local
     target: /data/files
+    default_gzip: true

@@ -1,0 +1,7 @@
+admin_token: "your-admin-token-here"
+redis_url: "redis://localhost:6379"
+redis_password: "your-redis-password"
+listen_addr: "0.0.0.0:8080"
+aws_region: "us-east-1"
+rate_limit_window_secs: 60
+presign_expiry_secs: 900

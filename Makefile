@@ -1,65 +1,29 @@
-.PHONY: help init-aws init-tencent deploy-aws deploy-tencent destroy-aws destroy-tencent build-rust build-dataset-gateway run-dataset-gateway
+.PHONY: help build run test docker compose-up compose-down
 
 help:
-	@echo "Dataset Gateway - OpenTofu + Rust Deployment"
+	@echo "Dataset Gateway - Local S3 presigned URL gateway"
 	@echo ""
-	@echo "Serverless (AWS/Tencent):"
-	@echo "  make build-rust      Build Rust Lambda function"
-	@echo "  make deploy-aws      Deploy AWS infrastructure"
-	@echo "  make deploy-tencent  Deploy Tencent Cloud infrastructure"
-	@echo "  make destroy-aws     Destroy AWS infrastructure"
-	@echo "  make destroy-tencent Destroy Tencent Cloud infrastructure"
-	@echo ""
-	@echo "Local dataset-gateway:"
-	@echo "  make build-dataset-gateway  Build local gateway binary"
-	@echo "  make run-dataset-gateway    Run local gateway (requires Redis)"
-	@echo "  make docker-dataset-gateway  Build Docker image"
-	@echo ""
-	@echo "Prerequisites:"
-	@echo "  - OpenTofu installed"
-	@echo "  - cargo-lambda installed (for Rust build)"
-	@echo "  - AWS credentials configured"
+	@echo "  make build        Build release binary"
+	@echo "  make run          Run gateway (requires Redis)"
+	@echo "  make test         Run tests"
+	@echo "  make docker       Build Docker image"
+	@echo "  make compose-up   Start gateway + Redis via Docker Compose"
+	@echo "  make compose-down Stop Docker Compose"
 
-build-rust:
-	@echo "Building Rust Lambda..."
-	@./scripts/build-rust.sh
-	@cp aws/target/lambda/dataset-gateway-auth/bootstrap.zip aws/bootstrap.zip 2>/dev/null || \
-	cp aws/target/lambda/*/bootstrap.zip aws/bootstrap.zip 2>/dev/null || \
-	echo "Build complete. Copy bootstrap.zip manually if above failed."
+build:
+	cargo build --release
 
-init-aws:
-	@echo "Initializing AWS backend..."
-	@cd aws && tofu init
+run:
+	cargo run
 
-init-tencent:
-	@echo "Initializing Tencent Cloud backend..."
-	@cd tencent && tofu init
+test:
+	cargo test
 
-deploy-aws: build-rust
-	@echo "Deploying AWS infrastructure..."
-	@cp aws/target/lambda/dataset-gateway-auth/bootstrap.zip aws/bootstrap.zip 2>/dev/null || true
-	@cd aws && tofu apply -var="aws_region=$${AWS_REGION:-us-east-1}" -var="project_name=$${PROJECT_NAME:-dataset-gateway}"
+docker:
+	docker build -t dataset-gateway .
 
-deploy-tencent:
-	@echo "Deploying Tencent Cloud infrastructure..."
-	@cd tencent && tofu apply -var="tencent_region=$${TENCENT_REGION:-ap-beijing}" -var="project_name=$${PROJECT_NAME:-dataset-gateway}"
+compose-up:
+	ADMIN_TOKEN=${ADMIN_TOKEN:?set ADMIN_TOKEN} docker compose up --build -d
 
-destroy-aws:
-	@echo "Destroying AWS infrastructure..."
-	@cd aws && tofu destroy -var="aws_region=$${AWS_REGION:-us-east-1}" -var="project_name=$${PROJECT_NAME:-dataset-gateway}"
-
-destroy-tencent:
-	@echo "Destroying Tencent Cloud infrastructure..."
-	@cd tencent && tofu destroy -var="tencent_region=$${TENCENT_REGION:-ap-beijing}" -var="project_name=$${PROJECT_NAME:-dataset-gateway}"
-
-build-dataset-gateway:
-	@echo "Building dataset-gateway..."
-	@cd dataset-gateway && cargo build --release
-
-run-dataset-gateway:
-	@echo "Running dataset-gateway..."
-	@cd dataset-gateway && cargo run
-
-docker-dataset-gateway:
-	@echo "Building dataset-gateway Docker image..."
-	@cd dataset-gateway && docker build -t dataset-gateway .
+compose-down:
+	docker compose down
